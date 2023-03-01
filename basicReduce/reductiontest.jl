@@ -1,4 +1,3 @@
-using GPUArrays
 using CUDA
 using Cthulhu
 
@@ -108,7 +107,7 @@ function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
         @cuda threads=threads blocks=1 small_reduce_kernel(R,partial)
     else 
         @cuda threads=threads blocks=1 small_reduce_kernel(R,A)       
-    end
+    end     
     
     return R
 end
