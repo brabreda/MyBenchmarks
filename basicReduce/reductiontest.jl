@@ -104,12 +104,10 @@ function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
 
     
     if(length(A) > threads * groups )
-        @cuda big_reduce_kernel(CUDADevice(), threads)(partial, A, ndrange=threads*groups)
-        @cuda small_reduce_kernel(CUDADevice(), threads)(R,partial, ndrange=threads, dependencies=(event,))
-        wait(event)
+        @cuda threads=threads blocks=groups big_reduce_kernel(partial, A)
+        @cuda threads=threads blocks=1 small_reduce_kernel(R,partial)
     else 
-        @cuda small_reduce_kernel(CUDADevice(), threads)(R,A, ndrange=threads)
-        wait(event)
+        @cuda threads=threads blocks=1 small_reduce_kernel(R,A)       
     end
     
     return R
