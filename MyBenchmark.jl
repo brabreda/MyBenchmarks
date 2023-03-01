@@ -6,12 +6,12 @@ using BenchmarkTools
 
 
 function benchmark_array()
-    a = CUDA.rand(10000)
+    b = CUDA.rand(10000)
 
-    v1 = @benchmark GPUArrays.mapreducedim!( x->x, +, similar(a,(1)), similar(a))
-    v2 = @benchmark mymapreducedim(similar(a,(1)), similar(a))
+    v1 = @benchmark GPUArrays.mapreducedim!( x->x, +, similar(b,(1)),similar(b))
+    #v2 = @benchmark mymapreducedim( x->x, +, similar(b,(1)), similar(b))
 
-    return v1, v2
+    #return v1, v2
 end
 
 function benchmark_2Dmatrix()
