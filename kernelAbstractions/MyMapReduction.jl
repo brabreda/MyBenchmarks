@@ -38,13 +38,13 @@ end
 function small_reduce_kernel(R,A)
     gridIdx = @index(Global) # dit was local maar dit werkte niet bij voor een array die kleiner is dan 32 * 1024
     val = 0.0
-
+    
     reduce_id = gridIdx
     while reduce_id <= length(A)
         val += A[reduce_id]
         reduce_id += (length(R) * @groupsize()[1])
     end
-   
+    
     val = block_reduce_kernel_1(val)
 
     if gridIdx == 1

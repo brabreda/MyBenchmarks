@@ -1,59 +1,51 @@
 using CUDA
-using Cthulhu
 
+@inline function reduce_block(val::T) where T
+    # shared mem for partial sums
+    shared = CuStaticSharedArray(T, 1)
 
-#function change_map_reduce()
-#    GPUArrays.mapreducedim!(f::F, op::OP, R::AnyCuArray{T}, A::Union{AbstractArray,Broadcast.Broadcasted}; 
-#        init=nothing) where {F, OP, T} = 
-#        invoke(mymapreducedim, Tuple{AnyCuArray{T}, Union{AbstractArray,Broadcast.Broadcasted}}, R, A)
-#end
+    wid, lane = fldmod1(threadIdx().x, warpsize())
+    # each warp performs partial reduction
+    val =  CUDA.reduce_warp(op, val)
 
-function block_reduce_kernel_1(val)
-    threads = blockDim().x
-    thread = threadIdx().x
-
-    # shared mem for a complete reduction
-    shared = CuDynamicSharedArray(T, (threads,))
-    @inbounds shared[thread] = val
-
-    sync_threads()
-
-    s = 1
-    while s < threads
-        if thread % (2*s) == 0
-            shared[thread] += shared[thread + s] 
-        end
-        sync_threads()
-        s*=2
+    if lane == 1
+        CUDA.@cuprintln(val)
     end
 
-    if thread == 1
-        val = @inbounds shared[thread]
+    # write reduced value to shared memory
+    if lane == 1
+        CUDA.atomic_add!(shared[1], val)
     end
 
+    if lane == 1
+    end
+
+    # final reduce within first warp
+    if wid == 1
+        val = shared[1]
+    end
+    
     return val
 end
 
+# er wordt maar 1 block gelaunched
 function small_reduce_kernel(R,A)
-    gridIdx = @index(Global) # dit was local maar dit werkte niet bij voor een array die kleiner is dan 32 * 1024
+    gridIdx = threadIdx().x + (blockIdx().x - 1) * blockDim().x
     val = 0.0
-
+    
     reduce_id = gridIdx
     while reduce_id <= length(A)
         val += A[reduce_id]
-        reduce_id += (length(R) * @groupsize()[1])
+        reduce_id += (length(R) * blockDim().x)
     end
-   
-    val = block_reduce_kernel_1(val)
+    
+    val = reduce_block(val)
 
-    if gridIdx == 1
-        R[1] = val
-    end 
+    return
 end
 
 function big_reduce_kernel(R,A)
-
-    gridIdx = @index(Global)
+    gridIdx = threadIdx().x + (blockIdx().x - 1) * blockDim().x
 
     val = 0.0
 
@@ -106,7 +98,7 @@ function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
         @cuda threads=threads blocks=groups big_reduce_kernel(partial, A)
         @cuda threads=threads blocks=1 small_reduce_kernel(R,partial)
     else 
-        @cuda threads=threads blocks=1 small_reduce_kernel(R,A)       
+        @cuda threads=threads blocks=groups small_reduce_kernel(R,A)       
     end     
     
     return R
