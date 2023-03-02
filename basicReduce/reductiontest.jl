@@ -3,43 +3,48 @@ using CUDA
 @inline function reduce_block(val::T) where T
     # shared mem for partial sums
     shared = CuStaticSharedArray(T, 1)
-
+    
     wid, lane = fldmod1(threadIdx().x, warpsize())
+    
     # each warp performs partial reduction
-    val =  CUDA.reduce_warp(op, val)
-
-    if lane == 1
-        CUDA.@cuprintln(val)
-    end
-
+    val =  CUDA.reduce_warp(+, val)
+   
     # write reduced value to shared memory
     if lane == 1
-        CUDA.atomic_add!(shared[1], val)
+        CUDA.@atomic shared[1] +=  val
     end
 
-    if lane == 1
-    end
+    # is it possible to do this with a atomic add. One of the problems we may have 
+    # is that only the warp that did the last addition will have the right value
+    
+    # we kunnen miss binnen deze blok de warps 2 bij 2 laten optellen en zo eventueel de volgorde bepalen
 
     # final reduce within first warp
-    if wid == 1
-        val = shared[1]
-    end
     
-    return val
+    return shared[1]
 end
 
 # er wordt maar 1 block gelaunched
 function small_reduce_kernel(R,A)
     gridIdx = threadIdx().x + (blockIdx().x - 1) * blockDim().x
+    shared = CuStaticSharedArray(Float64, 1)
     val = 0.0
     
     reduce_id = gridIdx
+
     while reduce_id <= length(A)
         val += A[reduce_id]
         reduce_id += (length(R) * blockDim().x)
     end
     
     val = reduce_block(val)
+
+    if threadIdx().x == 1
+        @cuprintln(val)
+        CUDA.@atomic shared[1] +=  val
+    end
+    
+    R[1] = shared[1]
 
     return
 end
@@ -50,9 +55,17 @@ function big_reduce_kernel(R,A)
     val = 0.0
 
     reduce_id = gridIdx
+
+    if threadIdx().x  == 1
+        CUDA.@cuprint("check")
+    end
+
     while reduce_id <= length(A)
         val += A[reduce_id]
         reduce_id += length(R)
+    end
+    if threadIdx().x  == 1
+        CUDA.@cuprint(val)
     end
 
     R[gridIdx] = val
@@ -80,8 +93,6 @@ function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
         dims = Base.fill_to_length(size(R), 1, Val(ndims(A)))
         R = reshape(R, dims)
     end
-
-    
 
     # iteration domain, split in two: one part covers the dimensions that should
     # be reduced, and the other covers the rest. combining both covers all values.
