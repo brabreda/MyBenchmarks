@@ -1,41 +1,9 @@
-using GPUArrays
 using CUDA
 using Cthulhu
+using KernelAbstractions
+using CUDAKernels
 
-
-#function change_map_reduce()
-#    GPUArrays.mapreducedim!(f::F, op::OP, R::AnyCuArray{T}, A::Union{AbstractArray,Broadcast.Broadcasted}; 
-#        init=nothing) where {F, OP, T} = 
-#        invoke(mymapreducedim, Tuple{AnyCuArray{T}, Union{AbstractArray,Broadcast.Broadcasted}}, R, A)
-#end
-
-function block_reduce_kernel_1(val)
-    threads = blockDim().x
-    thread = threadIdx().x
-
-    # shared mem for a complete reduction
-    shared = CuDynamicSharedArray(T, (threads,))
-    @inbounds shared[thread] = val
-
-    sync_threads()
-
-    s = 1
-    while s < threads
-        if thread % (2*s) == 0
-            shared[thread] += shared[thread + s] 
-        end
-        sync_threads()
-        s*=2
-    end
-
-    if thread == 1
-        val = @inbounds shared[thread]
-    end
-
-    return val
-end
-
-function small_reduce_kernel(R,A)
+@kernel function small_reduce_kernel(R,A)
     gridIdx = @index(Global) # dit was local maar dit werkte niet bij voor een array die kleiner is dan 32 * 1024
     val = 0.0
     
@@ -45,14 +13,14 @@ function small_reduce_kernel(R,A)
         reduce_id += (length(R) * @groupsize()[1])
     end
     
-    val = block_reduce_kernel_1(val)
+    val = @reduce(+ , val)
 
     if gridIdx == 1
         R[1] = val
     end 
 end
 
-function big_reduce_kernel(R,A)
+@kernel function big_reduce_kernel(R,A)
 
     gridIdx = @index(Global)
 
@@ -101,15 +69,17 @@ function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
     threads = 1024
     groups = 32
     partial = similar(R, threads * groups)
-
     
-    if(length(A) > threads * groups )
-        @cuda big_reduce_kernel(CUDADevice(), threads)(partial, A, ndrange=threads*groups)
-        @cuda small_reduce_kernel(CUDADevice(), threads)(R,partial, ndrange=threads, dependencies=(event,))
-        wait(event)
-    else 
-        @cuda small_reduce_kernel(CUDADevice(), threads)(R,A, ndrange=threads)
-        wait(event)
+
+    if has_cuda_gpu()
+        if(length(A) > threads * groups )
+            event = big_reduce_kernel(CUDADevice(), threads)(partial, A, ndrange=threads*groups)
+            event = small_reduce_kernel(CUDADevice(), threads)(R,partial, ndrange=threads, dependencies=(event,))
+            wait(event)
+        else 
+            event = small_reduce_kernel(CUDADevice(), threads)(R,A, ndrange=threads)
+            wait(event)
+        end
     end
     
     return R

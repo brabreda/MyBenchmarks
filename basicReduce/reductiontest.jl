@@ -8,10 +8,6 @@ using CUDA
     # each warp performs partial reduction
     val =  CUDA.reduce_warp(op, val)
 
-    if lane == 1
-        CUDA.@cuprintln(val)
-    end
-
     # write reduced value to shared memory
     if lane == 1
         CUDA.atomic_add!(shared[1], val)
