@@ -4,33 +4,65 @@ using BenchmarkTools
 using DataFrames
 
 
-function benchmark_baseline()
-    w = []
-    v = []
+
+function benchmark_baseline_1D()
 
     b =128 
-    while b < 10_000_000
+    while b < 5_000_000
+        println("benchmark: ",b)
         a = CUDA.rand(b)
-        push!(w, b)
 
-        time = CUDA.@elapsed GPUArrays.mapreducedim!(x->x, +, similar(a,(1)), a)
-
-        push!(v, time)
+        CUDA.@sync mapreduce(x->x, +, a);
 
         b = b * 2
-    end
+    end 
 
     
-    return DataFrame(N=w, Time=v)
+    return 
 end
 
-function benchmark_array()
-    a = CUDA.rand(10000)
+function benchmark_KA_1D()
+    a = CUDA.rand(10000);
+    mapreducedim(x->x, +, similar(a,(1)), a; init=0.0);
+    reductions = []
 
-    v1 = GPUArrays.mapreducedim!( x->x, +, similar(a,(1)), a)
-    v2 = mymapreducedim( x->x, +, similar(a,(1)), a)
+    grain = 2
+    while grain <= 32
+        b = 128
+        println("\n", "##########################")
+        println("grain: ",grain)
+        println("##########################")
+        while b < 5_000_000
+            println("benchmark: ",b)
+            a = CUDA.rand(b)
+            c = similar(a,(1))
 
-    return v1, v2
+            mapreducedim(x->x, +, c, a; init=0.0, grain=grain);
+
+            push!(reductions, c)
+            
+
+            b = b * 2
+        end 
+        grain = grain * 2
+    end
+
+    # println("\n","##########################")
+    # println("result: ")
+    # println("##########################")
+
+    # c = 128
+    # for i in reductions
+    #     if c > 5_000_000
+    #         print("\n")
+    #         c = 128
+    #     end
+
+    #     print(i, "\t")
+
+    #     c = c * 2
+    # end
+    
 end
 
 function benchmark_2Dmatrix()

@@ -3,7 +3,7 @@ using Cthulhu
 using KernelAbstractions
 using CUDAKernels
 
-@kernel function small_reduce_kernel(R,A)
+@kernel function small_reduce_kernel_atomic(R,A)
     gridIdx = @index(Global) # dit was local maar dit werkte niet bij voor een array die kleiner is dan 32 * 1024
     val = 0.0
     
@@ -16,23 +16,30 @@ using CUDAKernels
     val = @reduce(+ , val)
 
     if gridIdx == 1
-        R[1] = val
+        @atomic R[1] = R[1] + 1
     end 
 end
 
-@kernel function big_reduce_kernel(R,A)
-
-    gridIdx = @index(Global)
-
+#kernel uses a maximal of 32000 threads
+@kernel function small_reduce_kernel(R,A,T)
+    gridIdx = @index(Global) 
     val = 0.0
-
+    
+    # everything outside of the grid is reduced with a parallel add
     reduce_id = gridIdx
     while reduce_id <= length(A)
         val += A[reduce_id]
-        reduce_id += length(R)
+        reduce_id += (length(R) * @groupsize()[1])
     end
+    
+    #block reduce
+    val = @reduce(+ , val)
 
-    R[gridIdx] = val
+    # without atomics you have to do it with 2 kernels or you have to give give a partial array 
+    # to temporary store the values of each block
+    if gridIdx == 1
+        R[1] = val
+    end 
 end
 
 function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
@@ -77,10 +84,11 @@ function mymapreducedim(f::F, op::OP, R::AnyCuArray{T},
             event = small_reduce_kernel(CUDADevice(), threads)(R,partial, ndrange=threads, dependencies=(event,))
             wait(event)
         else 
-            event = small_reduce_kernel(CUDADevice(), threads)(R,A, ndrange=threads)
+            event = small_reduce_kernel(CUDADevice(), threads)(R,A,T ndrange=threads)
             wait(event)
         end
     end
+    print(R)
     
     return R
 end

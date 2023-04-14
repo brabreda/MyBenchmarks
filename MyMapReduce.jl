@@ -88,7 +88,7 @@ Base.@propagate_inbounds _map_getindex(args::Tuple{}, I) = ()
 # Reduce an array across the grid. All elements to be processed can be addressed by the
 # product of the two iterators `Rreduce` and `Rother`, where the latter iterator will have
 # singleton entries for the dimensions that should be reduced (and vice versa).
-function mapreduce_kernel(f, op, neutral, Rreduce, Rother, shuffle, R, As...)
+function partial_mapreduce_grid(f, op, neutral, Rreduce, Rother, shuffle, R, As...)
     assume(length(Rother) > 0)
 
     # decompose the 1D hardware indices into separate ones for reduction (across threads
@@ -129,8 +129,34 @@ function mapreduce_kernel(f, op, neutral, Rreduce, Rother, shuffle, R, As...)
         if threadIdx_reduce == 1
             R[Iout] = val
         end
+
+        
+
     end
 
+    return
+end
+
+function big_mapreduce_kernel(f, op, neutral, Rreduce, Rother, R, As)
+    grid_idx = threadIdx().x + (blockIdx().x - 1i32) * blockDim().x
+    @inbounds if grid_idx <= length(Rother)
+        Iother = Rother[grid_idx]
+
+        # load the neutral value
+        neutral = if neutral === nothing
+            R[Iother]
+        else
+            neutral
+        end
+
+        val = op(neutral, neutral)
+
+        Ibegin = Rreduce[1]
+        for Ireduce in Rreduce
+            val = op(val, f(As[Iother + Ireduce - Ibegin]))
+        end
+        R[Iother] = val
+    end
     return
 end
 
@@ -143,7 +169,7 @@ function big_mapreduce_threshold(dev)
     return max_concurrency
 end
 
-function GPUArrays.mapreducedim!(f::F, op::OP, R::AnyCuArray{T},
+function mapreducedim(f::F, op::OP, R::AnyCuArray{T},
                                  A::Union{AbstractArray,Broadcast.Broadcasted};
                                  init=nothing) where {F, OP, T}
     Base.check_reducedims(R, A)
@@ -246,6 +272,9 @@ function GPUArrays.mapreducedim!(f::F, op::OP, R::AnyCuArray{T},
         end
         # NOTE: we can't use the previously-compiled kernel, since the type of `partial`
         #       might not match the original output container (e.g. if that was a view).
+
+        # NOTE: kernel launches are expensive, it would be possible to reduce this with 
+        #an atomic operation this way we only have 1 reduction.
         @cuda(threads=threads, blocks=blocks, shmem=shmem,
               partial_mapreduce_grid(f, op, init, Rreduce, Rother, Val(shuffle), partial, A))
 
