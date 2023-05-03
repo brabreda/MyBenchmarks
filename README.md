@@ -13,3 +13,6 @@
 Dan kan je een kernel uitvoeren in de Julia REPL en hij zou automatisch in je Nsight Compute GUI moeten verschijnen.
 
 
+````
+benchmark(CUDA, :(mapreduce(x->x, +, data)))
+````

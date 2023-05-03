@@ -1,5 +1,6 @@
 using KernelAbstractions
 using CUDA
+using NVTX
 
 
 
@@ -13,42 +14,41 @@ using CUDA
 @kernel function reduce_kernel(f, op, neutral, grain, conf, R, A)
     # values for the kernel
     threadIdx_local = @index(Local)
+    threadIdx_global = @index(Global)
     groupIdx = @index(Group)
-    groupsize = @groupsize()[1]
-
-    startIdx_block = groupIdx * grain * groupsize
-
-    # if @index(Global) == 1
-    #     @print("threadIdx_local: ", threadIdx_local, "\n","groupIdx: ", groupIdx, "\n", "elements_per_thread: ", elements_per_thread, "\n", "elements_per_group: ", elements_per_group, "\n", length(A),"\n")
-
-    # end
+    gridsize = @ndrange()[1]
 
     # load neutral value
     neutral = if neutral === nothing
-        R[@index(Global)]
+        R[1]
     else
         neutral
     end
     
     val = op(neutral, neutral)
+
+    if threadIdx_global == 1 
+        R[1] = neutral
+    end
     # every thread reduces a few values parrallel
-    d = 0
-    while  d < grain
-        index = (@index(Global)-1) * grain + d + 1
-        if index <= length(A)
-            val = op(val,A[index])
-        end
-        d += 1
+    index = threadIdx_global 
+    while index <= length(A)
+        val = op(val,A[index])
+        index += gridsize
     end
 
     # reduce every block to a single value
-    @synchronize()
     val = @reduce(op, val, neutral, conf)
 
     # write reduces value to memory
     if threadIdx_local == 1
-        R[groupIdx] = val
+        if conf.supports_atomics
+            CUDA.@atomic R[1] = op(R[1], val)
+        else
+            R[groupIdx] = val
+        end
     end
+
 end
 
 @kernel function reduce_kernel(f, op, neutral, conf, Rreduce, Rother, R, A...)
@@ -98,7 +98,7 @@ end
 end
 
 # generic mapreduce
-function mapreducedim(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadcasted}; init=nothing , grain=2) where {F, OP}
+function mapreducedim(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadcasted}; init=nothing , atomics = false, warps = false) where {F, OP}
     Base.check_reducedims(R, A)
     length(A) == 0 && return R # isempty(::Broadcasted) iterates
 
@@ -110,37 +110,42 @@ function mapreducedim(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadcas
 
     # get the backend based on the array & get the device configuration
     backend = KernelAbstractions.get_backend(A)
-    conf = KernelAbstractions.getDeviceConfig(backend)
+    #conf = KernelAbstractions.getDeviceConfig(backend)
 
-    # TODO: don't hard code these values
-    threads = 1024
+    conf = KernelAbstractions.Config{
+        KernelAbstractions.warpsize(backend),
+        KernelAbstractions.maxgroupsize(backend),
+        KernelAbstractions.maxconcurrency(backend),
+        atomics,
+        warps 
+    }
+
+    # TODO: don't hard code these values 
 
     # when reducing to a single value, we can use a specialized kernel that works without cartesianindices
     # TODO: condition should be changed because it can also depend on f and op op should be associative
     if length(R) == 1
 
-        groupsize = length(A) > conf.max_groupsize ? convert(Int64, conf.max_groupsize) : length(A)
-        elements_per_thread = length(A) < grain * conf.max_groupsize * conf.max_groupsize ? grain : cld(length(A) / (conf.max_groupsize * conf.max_groupsize))
-        elements_per_thread = length(A) > conf.max_groupsize ? elements_per_thread : 1
-        # when the length of array is larger than maxthreads * grain, every thread should reduce more values
-        groups_per_grid = cld(length(A) , elements_per_thread * groupsize)
+        groupsize = convert(Int64, conf.max_groupsize)
+        elements_per_thread = length(A) > (conf.max_concurrency) ? cld(length(A), (conf.max_concurrency)) : 1
 
-        
-        @show(elements_per_thread)
-        @show(groups_per_grid)
+        # when the length of array is larger than maxthreads * grain, every thread should reduce more values
+        groups_per_grid = length(A) > (conf.max_concurrency) ? cld(conf.max_concurrency, conf.max_groupsize) : cld(length(A) , elements_per_thread * groupsize)
 
         # only a single block needs to be launched
         if groups_per_grid == 1
             reduce_kernel(backend, groupsize)(f, op, init, 1, conf, R, A, ndrange=groupsize)
             return R
         else
-            partial = similar(R, (size(R)..., groups_per_grid))
-            reduce_kernel(backend, groupsize)(f, op, init, grain, conf, partial, A, ndrange= groups_per_grid * groupsize)
+            partial = similar(R, (size(R)..., conf.supports_atomics ? 1 : groups_per_grid))
+            reduce_kernel(backend, groupsize)(f, op, init, elements_per_thread, conf, partial, A, ndrange= groups_per_grid * groupsize)
 
-            #@show(partial)
+            if conf.supports_atomics == false
+                mapreducedim(f, op, R, partial; init=init)
+                return R
+            end
 
-            mapreducedim(f, op, R, partial; init=init)
-            return R
+            return partial
         end
     
     else
@@ -179,10 +184,12 @@ function mapreducedim(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadcas
     return R
 end
 
-a = CUDA.rand(4_000_000)
+a = CUDA.rand(8_000_000)
 
 println(mapreduce(x->x, +, a)) 
-mapreducedim(x->x, +, similar(a,(1)), a; init=0.0, grain=8);
+println( mapreducedim(x->x, +, similar(a,(1)), a; init=Float32(0.0)))
 
- 
+a = CUDA.rand(20_000)
 
+println(mapreduce(x->x, +, a)) 
+println(mapreducedim(x->x, +, similar(a,(1)), a; init=Float32(0.0)))
