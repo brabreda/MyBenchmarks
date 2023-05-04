@@ -1,9 +1,9 @@
-using GPUArrays, CUDA
+using GPUArrays, Metal
 using DataFrames, Tables, Statistics, CSV
 
 using BenchmarkTools
 
-BenchmarkTools.DEFAULT_PARAMETERS.samples = 10000
+BenchmarkTools.DEFAULT_PARAMETERS.samples = 100
 
 # TODO add delta between the reduction results
 # with tables we can implement a custom table type for BenchmarkTools.Trial
@@ -31,8 +31,7 @@ function benchmark(backend, func::Expr; filtered=true)
     while n < 5_000_000 
 
         # this will take longer as every iteration the function will be parsed
-        result = eval(Meta.parse("@benchmark $func setup=(x->x, +, data) setup=(data=$backend.rand($n))"))
-
+        result = eval(Meta.parse("@benchmark $func setup=(data=$backend.ones($n))"))
         @show result
 
         # add result to results
@@ -111,7 +110,52 @@ function benchmark_NVIDIA()
     CSV.write("nvidia.csv", df)
 end
 
-benchmark_NVIDIA()
+function benchmark_APPLE()
+    metal_jl_warps = benchmark(Metal, :(GPUArrays.mapreducedim!(x->x, +, similar(data,(1)), data; init=Float32(0.0), shuffle=true)); filtered=false)    
+    metal_jl = benchmark(Metal, :(GPUArrays.mapreducedim!(x->x, +, similar(data,(1)), data; init=Float32(0.0))); filtered=false)
+    
+    ka = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0))); filtered=false)
+    ka_warps = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), warps=true)); filtered=false)
+    #ka_atomics = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), atomics=true )); filtered=false)
+    #ka_warps_atomics = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), warps=true, atomics=true)); filtered=false)
+    
+    metal_jl_warps.warps .= true
+    metal_jl_warps.atomics .= false
+
+    metal_jl.warps .= false
+    metal_jl.atomics .= false
+
+    ka.warps .= false
+    ka.atomics .= false
+    
+    ka_warps.warps .= true
+    ka_warps.atomics .= false
+    
+    #ka_atomics.warps .= false
+    #ka_atomics.atomics .= true
+    
+    #ka_warps_atomics.warps .= true
+    #ka_warps_atomics.atomics .= true
+    
+    # combine all ka dataframes
+    #ka = vcat(ka, ka_warps, ka_atomics, ka_warps_atomics)
+    ka = vcat(ka, ka_warps)
+    ka.package .= "KernelAbstractions.jl"
+    ka.filter .= false
+    # combine all cuda jl dataframes
+    metal_jl = vcat(metal_jl_warps, metal_jl)
+    metal_jl.package .= "Metal.jl"
+    metal_jl.filter .= false
+    
+    # combine all dataframes
+    df = vcat(ka, metal_jl)
+
+    #write df to nvidia.csv
+
+    CSV.write("apple.csv", df)
+end
+
+
 
 
 
