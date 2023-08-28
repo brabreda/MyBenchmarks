@@ -1,9 +1,11 @@
-using GPUArrays, Metal
+using GPUArrays
 using DataFrames, Tables, Statistics, CSV
 
 using BenchmarkTools
 
-BenchmarkTools.DEFAULT_PARAMETERS.samples = 100
+
+BenchmarkTools.DEFAULT_PARAMETERS.samples = 10000
+BenchmarkTools.DEFAULT_PARAMETERS.evals = 10
 
 # TODO add delta between the reduction results
 # with tables we can implement a custom table type for BenchmarkTools.Trial
@@ -20,143 +22,129 @@ function Tables.getcolumn(m::BenchmarkTools.Trial, i::Int)
 end
 Tables.getcolumn(m::BenchmarkTools.Trial, nm::Symbol) = Tables.getcolumn(m, nm == :times ? 1 : nm == :gctimes ? 2 : nm == :memory ? 3 : 4)
 
-# add optinal dims to use 1 function for all reductions
-# mapreduce(x->x, +, data)
-function benchmark(backend, func::Expr; filtered=true)
-
+function benchmark_CUDA(warps)
     results = []
     N = []
     
     n =128 
     while n < 5_000_000 
+        data=CUDA.ones(n)
+        final=CUDA.ones(1)
 
+        dev = CUDA.device()
+    
         # this will take longer as every iteration the function will be parsed
-        result = eval(Meta.parse("@benchmark $func setup=(data=$backend.ones($n))"))
-        @show result
+        bench = @benchmarkable CUDA.@sync( begin GPUArrays.mapreducedim!(x->x, +, $final, $data; init=Float32(0.00),shuffle=$warps) end) evals=1 samples=10000 seconds = 10000
 
+        result = run(bench)
+        display(result)
+ 
         # add result to results
         push!(results, result)
         push!(N, n)
 
         n = n * 2
+
+        sleep(30)
+
     end 
 
-    df_benchmark = mapreduce(vcat, zip(results,N)) do (x, y)
+    df_benchmark = mapreduce(vcat, zip(results, N)) do (x, y)
         df = DataFrame(x)
         df.N .= y
         df
     end
 
-    if filter == true
-        thresholds = Dict([(group.N[1], group.times[1]) for group in groupby(df_benchmark,:N)])
-        #filter per N the rows with times < treshold
-        df_benchmark = filter(row -> row.times < thresholds[row.N], df_benchmark)
-        df_benchmark = filter(row -> row.times < 1_000_000, df_benchmark)
-    end
-
-
-    return combine(groupby(df_benchmark, :N), 
-                 :times => minimum => :minimum,
-                 :times => mean => :average,
-                 :times => median => :median,
-                 :times => maximum => :maximum,
-                 :allocs => first => :allocations,
-                 :memory => first => :memory_estimate)
+    #return df_benchmark
+    return df_benchmark
 end
 
+function benchmark_KA(warps,atomics)
+    groupsize = [256 ,512, 1024]
+    items_per_workitem = [16, 32, 64]
+    groups_multiplier = [1]
 
-# read CSV
+    for g in groupsize
+        @show g
+        for i in items_per_workitem
+            @show i
+            for m in groups_multiplier
+                @show m
+                n = 128
+
+                while n < 5_000_000 
+                    data = CUDA.ones(n)
+                    final = CUDA.ones(1)
+
+                    dev = CUDA.device()
+        
+                    major = CUDA.capability(dev).major
+                    max_groupsize = if major >= 3 1024 else 512 end
+                    gridsize = CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+                    max_concurrency = max_groupsize * gridsize
+                    # supports_atomics = if warps == nothing major >= 2 else atomics end
+                    # supports_warp_reduce = if warps == nothing major >= 5 else warps end
+                    supports_atomics = atomics
+                    supports_warp_reduce = warps
+
+                    max_ndrange = g * gridsize * m
+
+                    conf = Config(g,32, max_ndrange, i, supports_atomics, supports_warp_reduce)
+                    #@show conf
+
+                    results = []
+                    N = []
+                    groupsizes = []
+                    items_per_workitems = []
+                    groups_multipliers = []
+
+
+                    # this will take longer as every iteration the function will be parsed
+            
+                    for idk in 1:10
+                        bench = @benchmarkable CUDA.@sync( begin mapreducedim!(x->x, +, $final, $data; init=Float32(0.00),conf=$conf) end) evals=1 samples=500 seconds = 10000
+
+                        result = run(bench)
+
+                        display(result)
+            
+                        # add result to results
+                        push!(results, result)
+                        push!(N, n)
+                        push!(groupsizes, g)
+                        push!(items_per_workitems, i)
+                        push!(groups_multipliers, m)
+                    end
+            
+                    n = n * 2
+            
+                    data = nothing
+                    partial = nothing
+                    
+                    CUDA.reclaim()
+
+                    df_benchmark = mapreduce(vcat, zip(results, N, groupsizes,items_per_workitems, groups_multipliers)) do (x,y, groupsizes,items_per_workitems, groups_multipliers )
+                        df = DataFrame(x)
+                        df.N .= y
+                        df.groupsize .= groupsizes
+                        df.items_per_workitem .= items_per_workitems
+                        df.groups_multiplier .= groups_multipliers
+                        df
+                    end
+    
+                    df_benchmark.atomics .= atomics
+                    df_benchmark.warps .= warps
+                    df_benchmark.package .= "KernelAbstractions.jl"
+        
+                    CSV.write("KA.csv", df_benchmark, append=true)                  
+                end         
+            end
+        end
+    end 
+end
+
 function benchmark_NVIDIA()
-    cuda_jl_warps = benchmark(CUDA, :(GPUArrays.mapreducedim!(x->x, +, similar(data,(1)), data; init=Float32(0.0), shuffle=true)); filtered=false)    
-    cuda_jl = benchmark(CUDA, :(GPUArrays.mapreducedim!(x->x, +, similar(data,(1)), data; init=Float32(0.0))); filtered=false)
-    
-    ka = benchmark(CUDA, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0))); filtered=false)
-    ka_warps = benchmark(CUDA, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), warps=true)); filtered=false)
-    ka_atomics = benchmark(CUDA, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), atomics=true )); filtered=false)
-    ka_warps_atomics = benchmark(CUDA, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), warps=true, atomics=true)); filtered=false)
-    
-    cuda_jl_warps.warps .= true
-    cuda_jl_warps.atomics .= false
-
-    cuda_jl.warps .= false
-    cuda_jl.atomics .= false
-
-    ka.warps .= false
-    ka.atomics .= false
-    
-    ka_warps.warps .= true
-    ka_warps.atomics .= false
-    
-    ka_atomics.warps .= false
-    ka_atomics.atomics .= true
-    
-    ka_warps_atomics.warps .= true
-    ka_warps_atomics.atomics .= true
-    
-    # combine all ka dataframes
-    ka = vcat(ka, ka_warps, ka_atomics, ka_warps_atomics)
-    ka.package .= "KernelAbstractions.jl"
-    ka.filter .= false
-    # combine all cuda jl dataframes
-    cuda_jl = vcat(cuda_jl_warps, cuda_jl)
-    cuda_jl.package .= "CUDA.jl"
-    cuda_jl.filter .= false
-    
-    # combine all dataframes
-    df = vcat(ka, cuda_jl)
-
-    #write df to nvidia.csv
-
-    CSV.write("nvidia.csv", df)
+    benchmark_KA(false, false)
 end
 
-function benchmark_APPLE()
-    metal_jl_warps = benchmark(Metal, :(GPUArrays.mapreducedim!(x->x, +, similar(data,(1)), data; init=Float32(0.0), shuffle=true)); filtered=false)    
-    metal_jl = benchmark(Metal, :(GPUArrays.mapreducedim!(x->x, +, similar(data,(1)), data; init=Float32(0.0))); filtered=false)
-    
-    ka = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0))); filtered=false)
-    ka_warps = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), warps=true)); filtered=false)
-    #ka_atomics = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), atomics=true )); filtered=false)
-    #ka_warps_atomics = benchmark(Metal, :(mapreducedim(x->x, +, similar(data,(1)), data; init=Float32(0.0), warps=true, atomics=true)); filtered=false)
-    
-    metal_jl_warps.warps .= true
-    metal_jl_warps.atomics .= false
-
-    metal_jl.warps .= false
-    metal_jl.atomics .= false
-
-    ka.warps .= false
-    ka.atomics .= false
-    
-    ka_warps.warps .= true
-    ka_warps.atomics .= false
-    
-    #ka_atomics.warps .= false
-    #ka_atomics.atomics .= true
-    
-    #ka_warps_atomics.warps .= true
-    #ka_warps_atomics.atomics .= true
-    
-    # combine all ka dataframes
-    #ka = vcat(ka, ka_warps, ka_atomics, ka_warps_atomics)
-    ka = vcat(ka, ka_warps)
-    ka.package .= "KernelAbstractions.jl"
-    ka.filter .= false
-    # combine all cuda jl dataframes
-    metal_jl = vcat(metal_jl_warps, metal_jl)
-    metal_jl.package .= "Metal.jl"
-    metal_jl.filter .= false
-    
-    # combine all dataframes
-    df = vcat(ka, metal_jl)
-
-    #write df to nvidia.csv
-
-    CSV.write("apple.csv", df)
-end
-
-
-
-
-
-
+benchmark_NVIDIA()
