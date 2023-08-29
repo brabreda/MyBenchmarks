@@ -184,12 +184,12 @@ function mapreducedim(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadcas
     return R
 end
 
-a = CUDA.rand(8_000_000)
+#a = CUDA.rand(8_000_000)
 
-println(mapreduce(x->x, +, a)) 
-println( mapreducedim(x->x, +, similar(a,(1)), a; init=Float32(0.0)))
+#println(mapreduce(x->x, +, a)) 
+#println( mapreducedim(x->x, +, similar(a,(1)), a; init=Float32(0.0)))
 
-a = CUDA.rand(20_000)
+#a = CUDA.rand(20_000)
 
-println(mapreduce(x->x, +, a)) 
-println(mapreducedim(x->x, +, similar(a,(1)), a; init=Float32(0.0)))
+#println(mapreduce(x->x, +, a)) 
+#println(mapreducedim(x->x, +, similar(a,(1)), a; init=Float32(0.0)))

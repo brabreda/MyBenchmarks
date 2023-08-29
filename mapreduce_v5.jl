@@ -1,38 +1,5 @@
 using KernelAbstractions
-
-struct Config{
-    GROUPSIZE, 
-    WARPSIZE,
-    MAX_NDRANGE,
-
-    ITEMS_PER_WORKITEM,
-    USE_ATOMICS,
-    USE_WARPS
-    }
-
-    function Config(groupsize, warpsize, max_ndrange, items_per_workitem , use_atomics, use_warps)
-        new{groupsize, warpsize, max_ndrange, items_per_workitem, use_atomics, use_warps}()
-    end
-end
-
-@inline function Base.getproperty(conf::Config{GROUPSIZE, WARPSIZE, MAX_NDRANGE, ITEMS_PER_WORKITEM, USE_ATOMICS, USE_WARPS}, sym::Symbol) where { GROUPSIZE, WARPSIZE, MAX_NDRANGE, ITEMS_PER_WORKITEM, USE_ATOMICS, USE_WARPS }
-    if sym == :groupsize
-        GROUPSIZE
-    elseif sym == :warpsize
-        WARPSIZE
-    elseif sym == :max_ndrange
-        MAX_NDRANGE
-    elseif sym == :items_per_workitem
-        ITEMS_PER_WORKITEM
-    elseif sym == :use_atomics
-        USE_ATOMICS
-    elseif sym == :use_warps
-        USE_WARPS        
-    else
-        # fallback for nothing
-        getfield(conf, sym)
-    end
-end
+using Atomix
 
 @enum GroupReduceAlgorithm  begin 
     THREADS
@@ -40,20 +7,6 @@ end
     SEQUENTIAL_WARP
 end
 
-function get_reduce_config(::CUDABackend, op::OP, type::Type{T}) where {T, OP}
-    dev = CUDA.device()
-    #major = CUDA.capability(dev).major
-    sm_count = CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-    
-    # if major >= ...
-        # for SM ... groupreduce with threads is faster than any other algorithm
-        return Config(512, 32, 512 * sm_count * 4, 32, false, true)
-    # elseif major >= ...
-    #     ...
-    # else
-    #     ...
-    # end
-end
 
 # function get_reduce_config(::CUDABackend, conf)
 #     dev = CUDA.device()
@@ -98,13 +51,14 @@ end
 @inline function __groupreduce(__ctx__, op, val, neutral, ::Type{T}, ::Val{WARP_WARP::GroupReduceAlgorithm}) where {T}
     threadIdx_local = KernelAbstractions.@index(Local)
     groupsize = KernelAbstractions.@groupsize()[1]
+    subgroupsize = KernelAbstractions.@subgroupsize()
 
-    shared = KernelAbstractions.@localmem(T, 32)
+    shared = KernelAbstractions.@localmem(T, subgroupsize)
 
-    warpIdx, warpLane = fldmod1(threadIdx_local, 32)
+    warpIdx, warpLane = fldmod1(threadIdx_local, subgroupsize)
 
     # each warp performs partial reduction
-    val = KernelAbstractions.@warpreduce(op, val)
+    val = KernelAbstractions.@subgroupreduce(op, val)
 
     # write reduced value to shared memory
     if warpLane == 1
@@ -115,7 +69,7 @@ end
     KernelAbstractions.@synchronize()
 
     # read from shared memory only if that warp existed
-    val = if threadIdx_local <= fld1(groupsize, 32)
+    val = if threadIdx_local <= fld1(groupsize, subgroupsize)
             @inbounds shared[warpLane]
     else
         neutral
@@ -123,7 +77,7 @@ end
 
     # final reduce within first warp
     if warpIdx == 1
-        val =  KernelAbstractions.@warpreduce(op, val)
+        val =  KernelAbstractions.@subgroupreduce(op, val)
     end
 
     return val
@@ -132,8 +86,9 @@ end
 @inline function __groupreduce(__ctx__, op, val, neutral, ::Type{T}, ::Val{SEQUENTIAL_WARP::GroupReduceAlgorithm}) where {T}
     threadIdx_local = KernelAbstractions.@index(Local)
     groupsize = KernelAbstractions.@groupsize()[1]
-    warpIdx, warpLane = fldmod1(threadIdx_local, 32)
-    items_per_workitem = cld(groupsize, 32)
+    subgroupsize = KernelAbstractions.@subgroupsize()
+    warpIdx, warpLane = fldmod1(threadIdx_local, subgroupsize)
+    items_per_workitem = cld(groupsize, subgroupsize)
 
     shared = KernelAbstractions.@localmem(T, groupsize)
 
@@ -150,7 +105,7 @@ end
             index += 1
         end
 
-        val = KernelAbstractions.@warpreduce(op, val)
+        val = KernelAbstractions.@subgroupreduce(op, val)
     end
 
     return val
@@ -219,29 +174,14 @@ end
         # use helper function to deal with atomic/non atomic reductions
         if threadIdx_local == 1
             if conf.use_atomics
-                #CUDA.@atomic R[1] = op(R[1], val)
+                ref = Atomix.IndexableRef(R, (1,));
+                Atomix.modify!(ref, op, val)
             else
                 @inbounds R[groupIdx] = val
             end
         end
 end
 
-@inline function __use_atomics(__ctx__, op, val, R, ::Val{false})
-    threadIdx_local = @index(Local)
-    groupIdx = @index(Group)
-
-    if threadIdx_local == 1
-        @inbounds R[groupIdx] = val
-    end
-end
-
-@inline function __use_atomics(__ctx__, op, val, R, ::Val{true})
-    threadIdx_local = @index(Local)
-
-    if threadIdx_local == 1
-        CUDA.@atomic R[1] = op(R[1], val)
-    end
-end
 
 # generic mapreduce
 function mapreducedim!(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadcasted}; init=nothing, conf=nothing) where {F, OP}
@@ -296,11 +236,18 @@ b= similar(a,(1))
 # # get type of a
 # println(typeof(a))
 
+dev = CUDA.device()
+    #major = CUDA.capability(dev).major
+sm_count = CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+
+
+conf = Config(1024, 32, 1024 * sm_count * 4, 32, true, false)
+
 
 #conf = get_reduce_config(CUDABackend(), +, Float32)
 #println(mapreduce(x->x, +, a)) 
-println(mapreducedim!(x->x, +, b,a; init=Float32(0.0)))
-@benchmark CUDA.@sync( begin mapreducedim!(x->x, +, $b, $a; init=Float32(0.0)) end)
+println(mapreducedim!(x->x, +, b,a; init=Float32(0.0), conf=conf))
+#@benchmark CUDA.@sync( begin mapreducedim!(x->x, +, $b, $a; init=Float32(0.0)) end)
 
 
 

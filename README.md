@@ -16,3 +16,21 @@ Dan kan je een kernel uitvoeren in de Julia REPL en hij zou automatisch in je Ns
 ````
 benchmark(CUDA, :(mapreduce(x->x, +, data)))
 ````
+
+# testing van grote variantie
+Bij het gebruik van --backtrace en --sample process-tree kwamen er wat errors opduiken bij het samplen. Dit kan eventueel worden opgelost door een lagere sample rate te gebruiken.
+````
+ LD_LIBRARY_PATH=$(/home/bbreda/julia-1.8.5/bin/julia -e 'println(joinpath(Sys.BINDIR, Base.LIBDIR, "julia"))') /opt/nvidia/nsight-systems/2023.1.1/bin/nsys profile /home/bbreda/julia-1.8.5/bin/julia testing/CUDABenchmarkAndProfile.jl
+````
+
+Na het testen van CUDA.jl blijkt dat we hier met hetzelfde probleem zitten. zeer hoge variantie, die in lijn lift met die van mijn implementatie via KA.jl .
+
+
+````
+    port = 9000 + rand(1:1000)
+    p = Tracy.capture("my_workload.tracy"; port)
+    run(addenv(`$(Base.julia_cmd()) testing/CUDAtracytest.jl`,
+               "TRACY_PORT" => string(port),
+               "JULIA_WAIT_FOR_TRACY" => "1"))
+    wait(p)
+````

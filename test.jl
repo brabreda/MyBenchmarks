@@ -1,37 +1,79 @@
-using KernelAbstractions
-using Metal
+struct Config{
+    GROUPSIZE, 
+    MAX_NDRANGE,
 
+    ITEMS_PER_WORKITEM,
+    USE_ATOMICS,
+    USE_WARPS
+    }
 
-@kernel function test1(conf, b, a)
-    threadIdx_global = @index(Global)
-
-    a[threadIdx_global] = 15
+    function Config(groupsize, max_ndrange, items_per_workitem , use_atomics, use_warps)
+        new{groupsize, max_ndrange, items_per_workitem, use_atomics, use_warps}()
+    end
 end
 
-@kernel function test2( b, a, conf)
-    threadIdx_global = @index(Global)
-
-    a[threadIdx_global] = 15
+@inline function Base.getproperty(conf::Type{Config{GROUPSIZE, MAX_NDRANGE, ITEMS_PER_WORKITEM, USE_ATOMICS, USE_WARPS}}, sym::Symbol) where { GROUPSIZE, MAX_NDRANGE,ITEMS_PER_WORKITEM, USE_ATOMICS, USE_WARPS }
+    println("here typed")
+    println(sym)
+    if sym == :groupsize
+        GROUPSIZE
+    elseif sym == :max_ndrange
+        MAX_NDRANGE
+    elseif sym == :items_per_workitem
+        ITEMS_PER_WORKITEM
+    elseif sym == :use_atomics
+        USE_ATOMICS
+    elseif sym == :use_warps
+        USE_WARPS        
+    else
+        # fallback for nothing
+        getfield(conf, sym)
+    end
 end
 
-a = Metal.ones(10000)
+@inline function Base.getproperty(conf::Type{Config{GROUPSIZE, MAX_NDRANGE, ITEMS_PER_WORKITEM, USE_ATOMICS, USE_WARPS}}, sym::Symbol) where { GROUPSIZE, MAX_NDRANGE,ITEMS_PER_WORKITEM, USE_ATOMICS, USE_WARPS }
+    println("here normal")
+    println(sym)
+    if sym == :groupsize
+        GROUPSIZE
+    elseif sym == :max_ndrange
+        MAX_NDRANGE
+    elseif sym == :items_per_workitem
+        ITEMS_PER_WORKITEM
+    elseif sym == :use_atomics
+        USE_ATOMICS
+    elseif sym == :use_warps
+        USE_WARPS        
+    else
+        # fallback for nothing
+        getfield(conf, sym)
+    end
+end
 
-backend = KernelAbstractions.get_backend(a)
+@generated function use_atomics(conf, x)
+    println(conf.use_atomics)
+    if conf.use_atomics
+        quote
+            
+        end
+    else 
+        return quote
+            x = x + 1
 
-partial = similar(a, 1,  1)
+            return x
+        end
+    end
+end
 
-println(typeof(partial))
+x=0
+conf = Config(32, 1024, 4, false, false)
 
-conf = KernelAbstractions.Config{
-    KernelAbstractions.warpsize(backend),
-    KernelAbstractions.maxgroupsize(backend),
-    KernelAbstractions.maxconcurrency(backend),
-    true,
-    true 
-}
+use_atomics(conf,x)
 
-test1(backend, 1024)(conf,partial,a, ndrange= 10000)
-@show a[1]
+x = use_atomics(conf,x)
 
-test2(backend, 1024)(partial,a,conf, ndrange= 10000)
-@show a[1]
+println(x)
+
+
+
+
