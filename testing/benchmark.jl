@@ -60,7 +60,7 @@ function benchmark_CUDA(warps)
 end
 
 function benchmark_KA(warps,atomics)
-    groupsize = [256 ,512, 1024]
+    groupsize = [512, 1024]
     items_per_workitem = [16, 32, 64]
     groups_multiplier = [1]
 
@@ -101,7 +101,7 @@ function benchmark_KA(warps,atomics)
 
                     # this will take longer as every iteration the function will be parsed
             
-                    for idk in 1:10
+                    for idk in 1:3
                         bench = @benchmarkable CUDA.@sync( begin mapreducedim!(x->x, +, $final, $data; init=Float32(0.00),conf=$conf) end) evals=1 samples=500 seconds = 10000
 
                         result = run(bench)
