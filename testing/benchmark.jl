@@ -145,6 +145,9 @@ end
 
 function benchmark_NVIDIA()
     benchmark_KA(false, false)
+    benchmark_KA(true, false)
+    benchmark_KA(false, true)
+    benchmark_KA(true, true)
 end
 
 benchmark_NVIDIA()

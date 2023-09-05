@@ -22,7 +22,7 @@ function Tables.getcolumn(m::BenchmarkTools.Trial, i::Int)
 end
 Tables.getcolumn(m::BenchmarkTools.Trial, nm::Symbol) = Tables.getcolumn(m, nm == :times ? 1 : nm == :gctimes ? 2 : nm == :memory ? 3 : 4)
 
-function benchmark_CUDA()
+function benchmark_METAL()
 
     
     n =128 
@@ -137,9 +137,10 @@ function benchmark_KA(warps,atomics)
     end 
 end
 
-function benchmark_NVIDIA()
-    #benchmark_KA(false, false)
-    benchmark_CUDA()
+function benchmark_APPLE()
+    benchmark_KA(true, false)
+    benchmark_KA(false, false)
+    benchmark_METAL()
 end
 
-benchmark_NVIDIA()
+benchmark_APPLE()
