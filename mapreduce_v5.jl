@@ -181,58 +181,30 @@ function mapreducedim!(f::F, op::OP, R, A::Union{AbstractArray,Broadcast.Broadca
     backend = KernelAbstractions.get_backend(A) 
 
     conf = if conf == nothing KernelAbstractions.get_reduce_config(backend, op, eltype(A)) else conf end
+    if length(R) == 1
+        if length(A) <= conf.items_per_workitem * conf.groupsize
 
-    return __devicereduce(f, op, R, A, init, conf, backend, Val(length(R)))
-end
-
-@inline function __devicereduce(f, op, R, A::Union{AbstractArray,Broadcast.Broadcasted},init ,conf, backend, ::Val{1})
-    if length(A) <= conf.items_per_workitem * conf.groupsize
-
-        reduce_kernel(backend, conf.groupsize)(f, op, init, R, A, conf, ndrange=conf.groupsize)
-        return R
-    else
-        # determine the number of workitems
-        gridsize = cld(length(A), conf.items_per_workitem)
-        gridsize = min(gridsize, conf.max_ndrange)
-
-        groups = cld(gridsize, conf.groupsize)
-        # important for using atomics
-        fill!(R,init)
-        partial = conf.use_atomics==true ? R : similar(R, (size(R)...,groups))
-
-        reduce_kernel(backend, conf.groupsize)(f, op, init, partial, A, conf, ndrange=gridsize)
-        
-        if !conf.use_atomics
-            __devicereduce(x->x, op, R, partial,init,conf, backend,Val(1))
+            reduce_kernel(backend, conf.groupsize)(f, op, init, R, A, conf, ndrange=conf.groupsize)
             return R
-        end
+        else
+            # How many workitems do we want?
+            gridsize = cld(length(A), conf.items_per_workitem)
+            # how many workitems can we have?
+            gridsize = min(gridsize, conf.max_ndrange)
 
-        return R
+            groups = cld(gridsize, conf.groupsize)
+            partial = conf.use_atomics==true ? R : similar(R, (size(R)...,groups))
+
+            reduce_kernel(backend, conf.groupsize)(f, op, init, partial, A, conf, ndrange=gridsize)
+            
+            if !conf.use_atomics
+                mapreducedim!(x->x, op, R, partial; init=init,conf=conf)
+            end   
+        end
+    else
+        # ...
     end
+
+    return R
 end
 
-
-#println(2^19)
-#a = Metal.ones(2^19)
-#b= similar(a,(1))
-
-#@show b
-#b = CUDA.ones(1)
-# # get type of a
-# println(typeof(a))
-
-    #major = CUDA.capability(dev).major
-
-
-#conf = Config(1024, 32, 1024 * sm_count * 4, 32, true, false)
-
-
-#conf = get_reduce_config(CUDABackend(), +, Float32)
-#println(mapreduce(x->x, +, a)) 
-#println(mapreducedim!(x->x, +, b,a; init=Float32(0.0)))
-#@benchmark CUDA.@sync( begin mapreducedim!(x->x, +, $b, $a; init=Float32(0.0)) end)
-
-
-
-#println(mapreduce(x->x, +, a)) 
-#println(mapreducedim(x->x, +, similar(a,(1)), a, b; init=Float32(0.0), warps=true))
